@@ -2,11 +2,24 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"time"
 )
+
+var ErrTemporary = errors.New("temporary failure")
+
+type JobError struct {
+	JobID int
+	Err   error
+}
+
+func (e JobError) Error() string {
+	return fmt.Sprintf("job %d: %v", e.JobID, e.Err)
+}
 
 type Result struct {
 	JobID int
@@ -20,58 +33,45 @@ func worker(ctx context.Context, id int, jobs <-chan int, results chan<- Result,
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("Worker %d stopping: %v\n", id, ctx.Err())
 			return
 
 		case job, ok := <-jobs:
 			if !ok {
 				return
 			}
-			fmt.Printf("Worker %d processing job %d\n", id, job)
 
 			// simulate work
-			time.Sleep(time.Millisecond * time.Duration(300+rand.Intn(400)))
+			time.Sleep(time.Millisecond * time.Duration(200+rand.Intn(300)))
+
+			// random failure
+			if rand.Intn(4) == 0 {
+				err := JobError{
+					JobID: job,
+					Err:   fmt.Errorf("%w: network glitch", ErrTemporary),
+				}
+				results <- Result{JobID: job, Err: err}
+				continue
+			}
 			results <- Result{JobID: job, Value: job * 2}
 		}
 	}
 }
 
 func main() {
-
 	rand.Seed(time.Now().UnixNano())
 
-	numJobs := 20
-	numWorker := 4
-
-	jobs := make(chan int, numJobs)
-	results := make(chan Result, numWorker)
-
-	// cancel everything after 1 sec
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	var wg sync.WaitGroup
+	results := RunWorkerPool(ctx, 20, 4)
 
-	// start workers
-	for w := 1; w <= numWorker; w++ {
-		wg.Add(1)
-		go worker(ctx, w, jobs, results, &wg)
+	for _, res := range results {
+		if res.Err != nil {
+			log.Printf("ERROR job_id=%d err=%v\n", res.JobID, res.Err)
+			continue
+		}
+		log.Printf("INFO job completed job_id=%d result=%d\n", res.JobID, res.Value)
 	}
 
-	// send jobs
-	for j := 1; j <= numJobs; j++ {
-		jobs <- j
-	}
-	close(jobs)
-
-	// close results after workers exit
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	for res := range results {
-		fmt.Printf("Result: job %d → %d\n", res.JobID, res.Value)
-	}
-	fmt.Println("All done")
+	log.Println("All workers finished")
 }
